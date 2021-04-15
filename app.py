@@ -26,15 +26,21 @@ def parse_args():
         default="."
     )
     parser.add_argument("--debug", "-d", action="store_true", help="enable debug mode")
+    parser.add_argument("--cuda", "-c", action="store_true", help="use CUDA")
     args = parser.parse_args()
-    return args.path, args.debug
+    return args.path, args.debug, args.cuda
 
-dir, debug = parse_args()
+dir, debug, cuda = parse_args()
+
+if cuda:
+    device = torch.device('cuda')
+else:
+    device = torch.device('cpu')
 # populate embedding dropdown with torch '.pt' files in the provided directory
 fs = list(Path(dir).glob('**/*.pt'))
 embeds_dropdown = [{'label': f.stem, 'value': str(f)} for f in fs]
 embeds_dropdown += [{'label': 'random', 'value': 'random'}]
-embeds = {str(f): torch.load(f) for f in fs}
+embeds = {str(f): torch.load(f, map_location=torch.device('cpu')) for f in fs}
 embeds.update({'random': torch.rand(1000,768)})
 # get vocabularies from '.txt' files with the same name as '.pt' files
 vocabs = {str(f): Path(f.with_suffix('.txt')).read_text().split('\n') for f in fs}
@@ -61,7 +67,7 @@ def get_cached_sims(evy, evx, sim):
     :param sim: str representing similarity type  (label in dropdown)
     :return: torch.FloatTensor of shape (y,x) containing similarities.
     """
-    ey, ex = embeds[evy], embeds[evx]
+    ey, ex = embeds[evy].to(device), embeds[evx].to(device)
     with torch.no_grad():
         if sim == 'ip':
             sims = torch.matmul(ey, ex.t())
@@ -74,8 +80,9 @@ def get_cached_sims(evy, evx, sim):
                 -2 * torch.matmul(ey, ex.t())
                 + (ey**2).sum(axis=1)[...,None] + (ex**2).sum(axis=1)
             )
-        cmin = sims.min().item()
-        cmax = sims.max().item()
+    sims = sims.cpu()
+    cmin = sims.min().item()
+    cmax = sims.max().item()
     return sims, cmin, cmax
 
 
@@ -152,10 +159,10 @@ def meanpool(a, yres, xres):
     xres = min(xres, a.shape[1])
     ky = math.ceil(a.shape[0] / yres)
     kx = math.ceil(a.shape[1] / xres)
-    m = torch.nn.AvgPool2d((ky,kx), ceil_mode=True)
+    m = torch.nn.AvgPool2d((ky,kx), ceil_mode=True).to(device)
     with torch.no_grad():
         mean_pooled = m(a[None,None,...])[0][0]
-    return mean_pooled
+    return mean_pooled.cpu()
 
 
 def downsample(x, y, z, xrange, yrange, res):
@@ -179,9 +186,6 @@ def downsample(x, y, z, xrange, yrange, res):
     yi = list(range(yrange[0], yrange[1], ystep))
     xx = [f"{x[i]}{' [...]' if xspan > res else ''}" for i in xi]
     yy = [f"{y[i]}{' [...]' if yspan > res else ''}" for i in yi]
-    print(f"x: {len(xx)} - [{xx[0]}, {xx[-1]}] - xspan: {xspan}")
-    print(f"y: {len(yy)} - [{yy[0]}, {yy[-1]}] - yspan: {yspan}")
-    print(zz.shape)
     return xx,yy,zz
 
 
