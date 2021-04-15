@@ -46,11 +46,16 @@ embeds.update({'random': torch.rand(1000,768)})
 vocabs = {str(f): Path(f.with_suffix('.txt')).read_text().split('\n') for f in fs}
 vocabs.update({'random': [str(i) for i in range(1000)]})
 vtoi = {k:{v:i for i,v in enumerate(vocab)} for k,vocab in vocabs.items()}
+sims_dropdown = [
+    {'label': 'Inner Product', 'value': 'ip'},
+    {'label': 'Cosine', 'value': 'cos'},
+    {'label': 'Euclidean Distance', 'value': 'l2'},
+]
 
 
-external_stylesheets = ['https://codepen.io/chriddyp/pen/bWLwgP.css']
+external_stylesheets = ['https://codepen.io/chriddyp/pen/bWLwgP.css',
+                        "https://codepen.io/chriddyp/pen/brPBPO.css"]
 app = dash.Dash(__name__, external_stylesheets=external_stylesheets)
-
 
 cache = Cache(app.server, config={
     'CACHE_TYPE': 'SimpleCache',
@@ -95,55 +100,50 @@ app.layout = html.Div(children=[
 
     html.Div([
         html.Div([
-            html.Label('Embeddings (y)'),
+            html.Label('Embeds (y)'),
             dcc.Dropdown(id='embeds_y', options=embeds_dropdown,
                          value=embeds_dropdown[0]['value']),
-        ], className="six columns"),
+        ], className="three columns"),
         html.Div([
-            html.Label('Embeddings (x)'),
+            html.Label('Embeds (x)'),
             dcc.Dropdown(id='embeds_x', options=embeds_dropdown,
                          value=embeds_dropdown[0]['value']),
-        ], className="six columns"),
-    ], className="row"),
-
-    html.Div([
+        ], className="three columns"),
         html.Div([
-            html.Label('Similarity/Distance'),
-            dcc.Dropdown(
-                id='sim',
-                options=[
-                    {'label': 'Cosine', 'value': 'cos'},
-                    {'label': 'Inner Product', 'value': 'ip'},
-                    {'label': 'Euclidean Distance', 'value': 'l2'},
-                ],
-                value='ip'
-            ),
-        ], className="six columns"),
+            html.Label('Sim/Dist'),
+            dcc.Dropdown(id='sim', options= sims_dropdown,
+                         value=sims_dropdown[0]['value']),
+        ], className="four columns"),
         html.Div([
-            html.Label('Resolution'),
-            dcc.Input(id="res", type="number", value=100, min=2, max=10_000, debounce=True),
-        ], className="six columns"),
+            html.Label('Update'),
+            html.Button(id='update', n_clicks=0, children='Update'),
+        ], className="two columns"),
     ], className="row"),
-
     html.Div([
         html.Div([
             html.Label('Search for y-axis embed'),
             dcc.Dropdown(id='ysearch', ),
-        ], className="four columns"),
+        ], className="five columns"),
         html.Div([
             html.Label('Search for x-axis embed'),
             dcc.Dropdown(id='xsearch', ),
-        ], className="four columns"),
+        ], className="five columns"),
         html.Div([
-            html.Label('Search and update heatmap'),
+            html.Label('Search'),
             html.Button(id='search', n_clicks=0, children='Search'),
-        ], className="four columns"),
+        ], className="two columns"),
     ], className="row"),
-
+    html.Div([
+        html.Label('Resolution'),
+        dcc.Input(id="res", type="number", value=100, min=2, max=10_000, debounce=True),
+    ]),
     dcc.Graph(
         id='xl-heatmap',
     ),
     dcc.Store(id='dragmode', data='zoom'),
+    dcc.Store(id='evx_store', data=embeds_dropdown[0]['value']),
+    dcc.Store(id='evy_store', data=embeds_dropdown[0]['value']),
+    dcc.Store(id='sim_store', data=sims_dropdown[0]['value']),
 ])
 
 
@@ -257,42 +257,55 @@ def get_new_range(relayout, fig, evy, evx, dragmode, res_change,
     return x0,x1,y0,y1
 
 @app.callback(
-    Output('xl-heatmap', 'figure'),
+    [Output('xl-heatmap', 'figure'),
     Output('dragmode', 'data'),
+    Output('evy_store', 'data'),
+    Output('evx_store', 'data'),
+    Output('sim_store', 'data')],
     [Input('xl-heatmap', 'relayoutData'),
-    Input('xl-heatmap', 'figure'),
     Input('dragmode', 'data'),
-    Input('embeds_y', 'value'),
-    Input('embeds_x', 'value'),
-    Input('sim', 'value'),
     Input('res', 'value'),
-    Input('search', 'n_clicks'),],
+    Input('update', 'n_clicks'),
+    Input('search', 'n_clicks')],
+    [State('xl-heatmap', 'figure'),
+    State('evy_store', 'data'),
+    State('evx_store', 'data'),
+    State('sim_store', 'data'),
+    State('embeds_y', 'value'),
+    State('embeds_x', 'value'),
+    State('sim', 'value'),
     State('xsearch', 'value'),
-    State('ysearch', 'value'),
+    State('ysearch', 'value')]
 )
-def update_figure(relayout, fig, dragmode, evy, evx, sim, res,
-                  search_clicks, xsearch, ysearch):
+def update_figure(relayout, dragmode, res, update_clicks, search_clicks,
+                  fig, evy, evx, sim, _evy, _evx, _sim, xsearch, ysearch):
     # store dragmode event to handle zoom/pan rescaling
     if relayout and 'dragmode' in relayout:
-        return fig, relayout['dragmode']
+        return fig, relayout['dragmode'], evy, evx, sim
+
+    # helper variables for event controlflow
+    triggered = [t['prop_id'] for t in dash.callback_context.triggered]
+    res_change = 'res.value' in triggered
+    search = 'search.n_clicks' in triggered
+    update = 'update.n_clicks' in triggered
+
+    # update data stores to most recent state
+    if update:
+        evy, evx, sim = _evy, _evx, _sim
 
     # load full cached data
     _zz, cmin, cmax = get_cached_sims(evy, evx, sim)
     _xt = vocabs[evx]
     _yt = vocabs[evy]
 
-    # downsample data (and reset axes if sims are recomputed)
-    triggered = [t['prop_id'] for t in dash.callback_context.triggered]
-    res_change = 'res.value' in triggered
-    search = 'search.n_clicks' in triggered
-    recompute_sims = any([v in triggered for v in
-                          ['embeds_y.value', 'embeds_x.value', 'sim.value']])
+    # downsample data, optionally reset axes, and generate fig
     x0,x1,y0,y1 = get_new_range(relayout, fig, evy, evx, dragmode, res_change,
                                 res, search, ysearch, xsearch,
-                                reset=recompute_sims)
+                                reset=update)
     xt, yt, zz = downsample(_xt, _yt, _zz, [x0, x1], [y0, y1], res)
-
     fig = go.Figure(data=[dict(type='heatmap', x=xt, y=yt, z=zz, zmin=cmin, zmax=cmax)])
+
+    # add cross-hairs on fig if search event is triggered
     if search:
         lines = []
         if xsearch:
@@ -303,7 +316,7 @@ def update_figure(relayout, fig, dragmode, evy, evx, sim, res,
             lines += [dict(type='line', y0=y, y1=y, x0=0, x1=len(xt)-1)]
         fig.update_layout(shapes=lines)
 
-    return fig, dragmode
+    return fig, dragmode, evy, evx, sim
 
 @app.callback(
     Output('xsearch', 'options'),
